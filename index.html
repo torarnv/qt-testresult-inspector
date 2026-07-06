@@ -188,7 +188,9 @@
   .test-result .rtype { font-weight: 600; display: inline-block; min-width: 52px; }
   .test-fail .rtype { color: var(--err); }
   .test-other .rtype { color: var(--warn); }
-  .result-hit { background: rgba(224, 113, 94, 0.10); }
+  .hit-fail { color: var(--err); }
+  .hit-other { color: var(--warn); }
+  .result-hit b, .hit-fail, .hit-other { font-weight: 600; }
   .result-hit.flash { background: var(--accent); color: #06231c; }
 
   .file-controls {
@@ -689,10 +691,13 @@
     const ids = new Map();
     results.forEach((r, idx) => ids.set(r.line, idx));
     return text.split("\n").map((line, i) => {
-      const esc = escapeHtml(line);
-      return ids.has(i)
-        ? '<span class="result-hit" id="res-' + ids.get(i) + '">' + esc + "</span>"
-        : esc;
+      if (!ids.has(i)) return escapeHtml(line);
+      const idAttr = ' id="res-' + ids.get(i) + '"';
+      const m = /^([A-Z][A-Z!]*)(\s*:\s*)(.*)$/.exec(line);
+      if (!m) return '<span class="result-hit"' + idAttr + ">" + escapeHtml(line) + "</span>";
+      const cls = /FAIL/.test(m[1]) ? "hit-fail" : "hit-other";
+      return '<span class="result-hit"' + idAttr + '><span class="' + cls + '">' +
+        escapeHtml(m[1]) + "</span>" + escapeHtml(m[2]) + "<b>" + escapeHtml(m[3]) + "</b></span>";
     }).join("\n");
   }
 
