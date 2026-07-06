@@ -15,7 +15,7 @@
     --accent: #4fd6b0;
     --accent-dim: #2c7a63;
     --warn: #e0a75e;
-    --err: #e0715e;
+    --err: #e5392a;
     --radius: 3px;
   }
   * { box-sizing: border-box; }
@@ -156,6 +156,41 @@
   }
   pre.preview.nowrap { white-space: pre; word-break: normal; }
   .truncated-note { color: var(--warn); font-size: 12px; margin-top: 8px; }
+
+  .test-summary {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    padding: 10px 12px;
+    margin: 0 0 12px;
+    max-height: 30vh;
+    overflow: auto;
+  }
+  .test-summary-head {
+    color: var(--text-dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-bottom: 8px;
+  }
+  .test-summary ul { list-style: none; margin: 0; padding: 0; }
+  .test-result {
+    display: block;
+    text-decoration: none;
+    color: var(--text);
+    padding: 3px 4px;
+    border-radius: var(--radius);
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .test-result:hover { background: var(--panel); }
+  .test-result .rtype { font-weight: 600; display: inline-block; min-width: 52px; }
+  .test-fail .rtype { color: var(--err); }
+  .test-other .rtype { color: var(--warn); }
+  .result-hit { background: rgba(224, 113, 94, 0.10); }
+  .result-hit.flash { background: var(--accent); color: #06231c; }
 
   .file-controls {
     display: flex;
@@ -639,23 +674,101 @@
     resultsEl.appendChild(panel);
   }
 
+  // Qt testlib plain-text result incidents. Passes are excluded from the
+  // non-pass summary; message lines (QWARN/QDEBUG/QINFO/...) aren't results.
+  const RESULT_TYPES = new Set(
+    ["PASS", "FAIL!", "XFAIL", "XPASS", "SKIP", "BPASS", "BFAIL", "BXPASS", "BXFAIL"]);
+  const PASS_TYPES = new Set(["PASS", "BPASS"]);
+
+  // Pull non-pass result incidents out of a testlib log. Each carries its line
+  // index (within the passed text) and a short label (the test function).
+  function parseTestResults(text) {
+    const lines = text.split("\n");
+    const results = [];
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^([A-Z][A-Z!]*)\s*:\s*(.*)$/.exec(lines[i]);
+      if (!m) continue;
+      const type = m[1];
+      if (!RESULT_TYPES.has(type) || PASS_TYPES.has(type)) continue;
+      const rest = m[2];
+      const fm = /^([\w:]+\s*\([^)]*\))/.exec(rest);
+      results.push({ line: i, type, label: fm ? fm[1] : rest.slice(0, 120) });
+    }
+    return results;
+  }
+
+  // Escape the log for HTML, wrapping each flagged result line in an anchored
+  // span (id="res-<idx>") so the summary can jump to it.
+  function annotateTestLog(text, results) {
+    const ids = new Map();
+    results.forEach((r, idx) => ids.set(r.line, idx));
+    return text.split("\n").map((line, i) => {
+      const esc = escapeHtml(line);
+      return ids.has(i)
+        ? '<span class="result-hit" id="res-' + ids.get(i) + '">' + esc + "</span>"
+        : esc;
+    }).join("\n");
+  }
+
+  // A clickable list of the non-pass results; each entry scrolls the matching
+  // anchored span into view and flashes it.
+  function buildResultSummary(results, panel) {
+    const summary = document.createElement("div");
+    summary.className = "test-summary";
+    const head = document.createElement("div");
+    head.className = "test-summary-head";
+    head.textContent = results.length + " non-pass result" + (results.length === 1 ? "" : "s");
+    summary.appendChild(head);
+    const ul = document.createElement("ul");
+    results.forEach((r, idx) => {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = "#";
+      a.className = "test-result " + (/FAIL/.test(r.type) ? "test-fail" : "test-other");
+      const badge = document.createElement("span");
+      badge.className = "rtype";
+      badge.textContent = r.type;
+      a.appendChild(badge);
+      a.appendChild(document.createTextNode(" " + r.label));
+      a.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        const target = panel.querySelector("#res-" + idx);
+        if (!target) return;
+        target.scrollIntoView({ block: "center" });
+        target.classList.add("flash");
+        setTimeout(() => target.classList.remove("flash"), 1200);
+      });
+      li.appendChild(a);
+      ul.appendChild(li);
+    });
+    summary.appendChild(ul);
+    return summary;
+  }
+
   function renderFound(entry, bytes, stoppedEarly) {
     resultsEl.innerHTML = "";
     const panel = document.createElement("div");
     panel.className = "panel";
 
     const isText = looksLikeText(entry.name, bytes);
+    const base = entry.name.split("/").pop();
+    const isTestLog = /^tst_/.test(base) && /\.txt$/.test(base);
     const PREVIEW_CAP = 5 * 1024 * 1024;
     let bodyHtml = "";
+    let testResults = null;
 
     if (isText) {
       const text = textDecoder.decode(bytes);
       const shown = text.length > PREVIEW_CAP ? text.slice(0, PREVIEW_CAP) : text;
-      bodyHtml =
-        '<pre class="preview">' + escapeHtml(shown) + "</pre>" +
-        (text.length > PREVIEW_CAP
-          ? '<div class="truncated-note">Preview truncated at ' + formatBytes(PREVIEW_CAP) + " — download for the full file.</div>"
-          : "");
+      const truncNote = text.length > PREVIEW_CAP
+        ? '<div class="truncated-note">Preview truncated at ' + formatBytes(PREVIEW_CAP) + " — download for the full file.</div>"
+        : "";
+      if (isTestLog) {
+        testResults = parseTestResults(shown);
+        bodyHtml = '<pre class="preview">' + annotateTestLog(shown, testResults) + "</pre>" + truncNote;
+      } else {
+        bodyHtml = '<pre class="preview">' + escapeHtml(shown) + "</pre>" + truncNote;
+      }
     } else {
       bodyHtml = '<div class="meta">Binary content — no inline preview.</div>';
     }
@@ -669,6 +782,11 @@
       ev.preventDefault();
       navigate(urlInput.value.trim(), "", true);
     });
+
+    if (testResults && testResults.length) {
+      const pre = panel.querySelector(".preview");
+      panel.insertBefore(buildResultSummary(testResults, panel), pre);
+    }
 
     const controls = document.createElement("div");
     controls.className = "file-controls";
