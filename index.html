@@ -147,7 +147,6 @@
     border: 1px solid var(--line);
     border-radius: var(--radius);
     padding: 12px;
-    max-height: 85vh;
     overflow: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -616,20 +615,7 @@
 
   let currentController = null;
 
-  // Grow the shown preview so the panel's bottom sits just above the viewport
-  // bottom — fills the remaining space without overflowing into a page scroll.
-  // Self-correcting via clientHeight + delta, so it's safe to call repeatedly.
-  let currentPreview = null;
   let wrapLines = getCookie("wrapLines") === "1";
-  function fitPreview() {
-    const pre = currentPreview;
-    if (!pre || !pre.isConnected) { currentPreview = null; return; }
-    const panel = pre.closest(".panel");
-    const bottomGap = 24;
-    const delta = (window.innerHeight - bottomGap) - panel.getBoundingClientRect().bottom;
-    pre.style.maxHeight = Math.max(160, pre.clientHeight + delta) + "px";
-  }
-  window.addEventListener("resize", fitPreview);
 
   function setBusy(busy) {
     goBtn.disabled = busy;
@@ -800,9 +786,9 @@
     panel.appendChild(controls);
     resultsEl.appendChild(panel);
 
-    currentPreview = panel.querySelector(".preview");
-    if (currentPreview) {
-      currentPreview.classList.toggle("nowrap", !wrapLines);
+    const pre = panel.querySelector(".preview");
+    if (pre) {
+      pre.classList.toggle("nowrap", !wrapLines);
 
       const toggle = document.createElement("label");
       toggle.className = "wrap-toggle";
@@ -812,14 +798,11 @@
       cb.addEventListener("change", () => {
         wrapLines = cb.checked;
         setCookie("wrapLines", wrapLines ? "1" : "0");
-        currentPreview.classList.toggle("nowrap", !wrapLines);
-        requestAnimationFrame(fitPreview);
+        pre.classList.toggle("nowrap", !wrapLines);
       });
       toggle.appendChild(cb);
       toggle.appendChild(document.createTextNode("wrap lines"));
       controls.appendChild(toggle);
-
-      requestAnimationFrame(fitPreview);
     }
   }
 
