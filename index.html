@@ -28,7 +28,7 @@
     line-height: 1.5;
   }
   body { padding: 32px 20px 24px; }
-  .wrap { max-width: 860px; margin: 0 auto; }
+  .wrap { max-width: none; margin: 0; }
 
   h1 {
     font-size: 15px;
@@ -154,7 +154,26 @@
     font-size: 12.5px;
     margin: 0;
   }
+  pre.preview.nowrap { white-space: pre; word-break: normal; }
   .truncated-note { color: var(--warn); font-size: 12px; margin-top: 8px; }
+
+  .file-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .wrap-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .wrap-toggle input { accent-color: var(--accent); cursor: pointer; }
 
   table.listing { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   table.listing th, table.listing td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -482,6 +501,15 @@
     return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + " " + units[i];
   }
 
+  function setCookie(name, value) {
+    document.cookie = name + "=" + encodeURIComponent(value) + ";max-age=31536000;samesite=lax";
+  }
+
+  function getCookie(name) {
+    const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
   function archiveName(url) {
     try {
       const seg = new URL(url).pathname.split("/").filter(Boolean).pop();
@@ -557,6 +585,7 @@
   // bottom — fills the remaining space without overflowing into a page scroll.
   // Self-correcting via clientHeight + delta, so it's safe to call repeatedly.
   let currentPreview = null;
+  let wrapLines = getCookie("wrapLines") === "1";
   function fitPreview() {
     const pre = currentPreview;
     if (!pre || !pre.isConnected) { currentPreview = null; return; }
@@ -641,17 +670,39 @@
       navigate(urlInput.value.trim(), "", true);
     });
 
+    const controls = document.createElement("div");
+    controls.className = "file-controls";
+
     const dlBtn = document.createElement("button");
     dlBtn.className = "btn-ghost btn-sm";
-    dlBtn.style.marginTop = "12px";
     dlBtn.textContent = "Download";
     dlBtn.onclick = () => downloadBlob(bytes, entry.name);
-    panel.appendChild(dlBtn);
+    controls.appendChild(dlBtn);
 
+    panel.appendChild(controls);
     resultsEl.appendChild(panel);
 
     currentPreview = panel.querySelector(".preview");
-    if (currentPreview) requestAnimationFrame(fitPreview);
+    if (currentPreview) {
+      currentPreview.classList.toggle("nowrap", !wrapLines);
+
+      const toggle = document.createElement("label");
+      toggle.className = "wrap-toggle";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = wrapLines;
+      cb.addEventListener("change", () => {
+        wrapLines = cb.checked;
+        setCookie("wrapLines", wrapLines ? "1" : "0");
+        currentPreview.classList.toggle("nowrap", !wrapLines);
+        requestAnimationFrame(fitPreview);
+      });
+      toggle.appendChild(cb);
+      toggle.appendChild(document.createTextNode("wrap lines"));
+      controls.appendChild(toggle);
+
+      requestAnimationFrame(fitPreview);
+    }
   }
 
   function renderNotFound(targetName, entries) {
