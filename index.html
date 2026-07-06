@@ -1,0 +1,855 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tar.zst inspector</title>
+<style>
+  :root {
+    --bg: #0a0f1a;
+    --panel: #111a2b;
+    --panel-2: #0d1522;
+    --line: #22314a;
+    --text: #dbe4f0;
+    --text-dim: #7c8aa3;
+    --accent: #4fd6b0;
+    --accent-dim: #2c7a63;
+    --warn: #e0a75e;
+    --err: #e0715e;
+    --radius: 3px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  body { padding: 32px 20px 24px; }
+  .wrap { max-width: 860px; margin: 0 auto; }
+
+  h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: lowercase;
+    margin: 0 0 4px;
+    color: var(--text);
+  }
+  h1::before { content: "$ "; color: var(--accent); }
+  .sub {
+    color: var(--text-dim);
+    font-size: 12.5px;
+    margin: 0 0 28px;
+    max-width: 640px;
+  }
+  .sub a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent-dim); }
+  .sub a:hover { border-bottom-style: solid; }
+
+  form {
+    display: grid;
+    gap: 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+  input[type=text], input[type=url] {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    padding: 9px 10px;
+    border-radius: var(--radius);
+    font: inherit;
+  }
+  input[type=text]:focus, input[type=url]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent-dim);
+  }
+  .row { display: grid; grid-template-columns: 2fr 1.3fr auto; gap: 10px; align-items: end; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    padding: 9px 16px;
+    background: var(--panel-2);
+    color: var(--text);
+  }
+  button:hover { border-color: var(--accent-dim); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #06231c;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #5fe6c0; border-color: #5fe6c0; }
+  .btn-ghost { background: transparent; }
+  .btn-sm { padding: 5px 10px; font-size: 12.5px; }
+
+  .hint { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+  #status {
+    margin-top: 18px;
+    display: none;
+  }
+  #status.active { display: block; }
+  .statline { display: flex; justify-content: space-between; color: var(--text-dim); font-size: 12.5px; margin-bottom: 6px; }
+  .statline strong { color: var(--text); font-weight: 500; }
+  .bar-track { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); height: 8px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); width: 0%; transition: width .15s linear; }
+  .bar-fill.indeterminate {
+    width: 30% !important;
+    animation: slide 1.1s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { margin-left: -30%; }
+    100% { margin-left: 100%; }
+  }
+  .cancel-line { margin-top: 8px; }
+
+  #results { margin-top: 22px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .panel + .panel { margin-top: 14px; }
+  .msg-err { color: var(--err); }
+  .msg-warn { color: var(--warn); }
+  .msg-ok { color: var(--accent); }
+  .meta { color: var(--text-dim); font-size: 12.5px; margin: 6px 0 12px; }
+  .meta b { color: var(--text); font-weight: 500; }
+
+  .crumb { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .crumb-link { color: var(--accent); text-decoration: none; cursor: pointer; border-bottom: 1px dotted var(--accent-dim); }
+  .crumb-link:hover { border-bottom-style: solid; }
+  .crumb-sep { color: var(--text-dim); }
+
+  pre.preview {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px;
+    max-height: 85vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12.5px;
+    margin: 0;
+  }
+  .truncated-note { color: var(--warn); font-size: 12px; margin-top: 8px; }
+
+  table.listing { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.listing th, table.listing td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  table.listing th { color: var(--text-dim); font-weight: 500; text-transform: uppercase; font-size: 10.5px; letter-spacing: .05em; }
+  table.listing td.size { color: var(--text-dim); white-space: nowrap; }
+  table.listing td.actions { white-space: nowrap; text-align: right; }
+  table.listing tr.clickable { cursor: pointer; }
+  table.listing tr.clickable:hover td { background: var(--panel-2); }
+  .filter-row { margin-bottom: 10px; }
+  .filter-row input { max-width: 320px; display: inline-block; }
+  .count-note { color: var(--text-dim); font-size: 12px; margin-top: 8px; }
+
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>tar.zst inspector</h1>
+  <p class="sub">
+    Point this at a <code>.tar.zst</code> URL and optionally name a file inside it.
+    Everything runs in your browser — the archive is streamed and decompressed
+    locally, nothing is uploaded anywhere.
+  </p>
+
+  <form id="form">
+    <div class="row">
+      <div>
+        <label for="url">Archive URL</label>
+        <input type="url" id="url" placeholder="https://example.com/testresults.tar.zst" required>
+      </div>
+      <div>
+        <label for="filename">File inside archive (optional)</label>
+        <input type="text" id="filename" placeholder="test_summary.ctest_junit_xml">
+      </div>
+      <button type="submit" class="btn-primary" id="go">Fetch</button>
+    </div>
+    <div class="hint">Leave the filename blank to list everything in the archive first.</div>
+  </form>
+
+  <div id="status">
+    <div class="statline">
+      <span id="statusLabel">working…</span>
+      <strong id="statusNum"></strong>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+    <div class="cancel-line"><button type="button" class="btn-ghost btn-sm" id="cancelBtn">Cancel</button></div>
+  </div>
+
+  <div id="results"></div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ---------- tar streaming parser ----------
+
+  const textDecoder = new TextDecoder("utf-8", { fatal: false });
+
+  function readStr(header, offset, length) {
+    const bytes = header.subarray(offset, offset + length);
+    let end = bytes.indexOf(0);
+    if (end === -1) end = bytes.length;
+    return textDecoder.decode(bytes.subarray(0, end));
+  }
+
+  function readSize(header) {
+    const field = header.subarray(124, 136);
+    if (field[0] & 0x80) {
+      // GNU base-256 encoded size (for files/offsets that don't fit in octal ASCII)
+      let value = BigInt(field[0] & 0x7f);
+      for (let i = 1; i < field.length; i++) value = (value << 8n) + BigInt(field[i]);
+      return Number(value);
+    }
+    let s = "";
+    for (let i = 0; i < field.length; i++) {
+      const c = field[i];
+      s += c === 0 ? " " : String.fromCharCode(c);
+    }
+    s = s.trim();
+    return s ? parseInt(s, 8) : 0;
+  }
+
+  function isAllZero(buf) {
+    for (let i = 0; i < buf.length; i++) if (buf[i] !== 0) return false;
+    return true;
+  }
+
+  function concatBytes(a, b) {
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+  }
+
+  function parsePaxRecords(text) {
+    const result = {};
+    let i = 0;
+    while (i < text.length) {
+      let j = i;
+      while (j < text.length && text[j] !== " ") j++;
+      const len = parseInt(text.slice(i, j), 10);
+      if (!len || isNaN(len) || len <= 0) break;
+      const record = text.slice(i, i + len);
+      const spaceIdx = record.indexOf(" ");
+      const eq = record.indexOf("=", spaceIdx);
+      if (spaceIdx === -1 || eq === -1) break;
+      const key = record.slice(spaceIdx + 1, eq);
+      let value = record.slice(eq + 1);
+      if (value.endsWith("\n")) value = value.slice(0, -1);
+      result[key] = value;
+      i += len;
+    }
+    return result;
+  }
+
+  // onEntry(entry) fires for every real file/dir header ({name, size, type}).
+  // It must return null (skip data) or {write(chunk), end()} to capture bytes.
+  class TarParser {
+    constructor(onEntry) {
+      this.onEntry = onEntry;
+      this.buf = new Uint8Array(0);
+      this.mode = "header";
+      this.pendingName = null;
+      this.pendingSize = null;
+      this.current = null;
+      this.zeroBlocks = 0;
+      this.ended = false;
+    }
+
+    push(chunk) {
+      if (this.ended || !chunk || chunk.length === 0) return;
+      this.buf = concatBytes(this.buf, chunk);
+      this._process();
+    }
+
+    _process() {
+      while (true) {
+        if (this.mode === "data") {
+          const c = this.current;
+          const take = Math.min(this.buf.length, c.remaining);
+          if (take > 0) {
+            if (c.consumer) c.consumer.write(this.buf.subarray(0, take));
+            this.buf = this.buf.subarray(take);
+            c.remaining -= take;
+          }
+          if (c.remaining > 0) return;
+          const pad = (512 - (c.size % 512)) % 512;
+          if (this.buf.length < pad) return;
+          this.buf = this.buf.subarray(pad);
+          if (c.consumer) c.consumer.end();
+          this.current = null;
+          this.mode = "header";
+          continue;
+        }
+
+        if (this.buf.length < 512) return;
+        const header = this.buf.subarray(0, 512);
+        this.buf = this.buf.subarray(512);
+
+        if (isAllZero(header)) {
+          this.zeroBlocks++;
+          if (this.zeroBlocks >= 2) { this.ended = true; return; }
+          continue;
+        }
+        this.zeroBlocks = 0;
+
+        const typeflag = String.fromCharCode(header[156]);
+        const size = this.pendingSize !== null ? this.pendingSize : readSize(header);
+        let name = readStr(header, 0, 100);
+        const prefix = readStr(header, 345, 155);
+        if (prefix) name = prefix + "/" + name;
+        if (this.pendingName !== null) name = this.pendingName;
+        this.pendingName = null;
+        this.pendingSize = null;
+
+        if (typeflag === "L") { // GNU long name: data is the name for the *next* header
+          let collected = new Uint8Array(0);
+          this.current = {
+            size, remaining: size,
+            consumer: {
+              write: (d) => { collected = concatBytes(collected, d); },
+              end: () => {
+                let s = textDecoder.decode(collected);
+                const nul = s.indexOf("\0");
+                this.pendingName = nul >= 0 ? s.slice(0, nul) : s;
+              }
+            }
+          };
+          this.mode = "data";
+          continue;
+        }
+
+        if (typeflag === "x" || typeflag === "g") { // pax extended header
+          let collected = new Uint8Array(0);
+          this.current = {
+            size, remaining: size,
+            consumer: {
+              write: (d) => { collected = concatBytes(collected, d); },
+              end: () => {
+                const kv = parsePaxRecords(textDecoder.decode(collected));
+                if (kv.path) this.pendingName = kv.path;
+                if (kv.size) this.pendingSize = parseInt(kv.size, 10);
+              }
+            }
+          };
+          this.mode = "data";
+          continue;
+        }
+
+        const consumer = this.onEntry({ name, size, type: typeflag });
+        this.current = { size, remaining: size, consumer };
+        this.mode = "data";
+      }
+    }
+  }
+
+  // ---------- archive scanning ----------
+
+  class HttpError extends Error {
+    constructor(status, statusText) {
+      super(`HTTP ${status} ${statusText}`);
+      this.status = status;
+    }
+  }
+
+  function concatAll(chunks, totalLen) {
+    const out = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    return out;
+  }
+
+  // Streams `url`, decompresses zstd, walks the tar. If targetName is given,
+  // captures that one entry's bytes and aborts the fetch the moment it's fully
+  // read. If targetName is null, walks every entry (skipping file bodies) to
+  // build a full listing.
+  async function scanArchive(url, targetName, { signal, onProgress } = {}) {
+    const res = await fetch(url, { signal, mode: "cors" });
+    if (!res.ok) throw new HttpError(res.status, res.statusText);
+
+    const contentLengthHeader = res.headers.get("content-length");
+    const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+
+    const entries = [];
+    let foundEntry = null;
+    let foundComplete = false;
+    let capturedChunks = [];
+
+    const parser = new TarParser((entry) => {
+      entries.push(entry);
+      if (targetName && entry.name === targetName) {
+        foundEntry = entry;
+        return {
+          write: (d) => capturedChunks.push(d),
+          end: () => { foundComplete = true; }
+        };
+      }
+      return null;
+    });
+
+    let parseError = null;
+    const zstd = new fzstd.Decompress((chunk) => {
+      try { parser.push(chunk); } catch (e) { parseError = e; }
+    });
+
+    if (!res.body) {
+      // Fallback for browsers without streaming response bodies: read it all,
+      // then decompress in one shot. No early-abort possible in this path.
+      const full = new Uint8Array(await res.arrayBuffer());
+      zstd.push(full, true);
+      if (parseError) throw parseError;
+      const data = foundEntry ? concatAll(capturedChunks, foundEntry.size) : null;
+      return { entries, foundEntry, data, stoppedEarly: false, bytesRead: full.length, totalBytes: full.length };
+    }
+
+    const reader = res.body.getReader();
+    let bytesRead = 0;
+    let stoppedEarly = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        zstd.push(new Uint8Array(0), true);
+        break;
+      }
+      bytesRead += value.length;
+      try {
+        zstd.push(value);
+      } catch (e) {
+        try { await reader.cancel(); } catch (_) {}
+        throw new Error("Couldn't decompress this as zstd: " + e.message);
+      }
+      if (parseError) { try { await reader.cancel(); } catch (_) {} throw parseError; }
+
+      if (onProgress) {
+        onProgress({
+          bytesRead, totalBytes,
+          entriesSeen: entries.length,
+          lastEntryName: entries.length ? entries[entries.length - 1].name : null
+        });
+      }
+
+      if (targetName && foundComplete) {
+        stoppedEarly = true;
+        try { await reader.cancel(); } catch (_) {}
+        break;
+      }
+    }
+
+    const data = foundEntry ? concatAll(capturedChunks, foundEntry.size) : null;
+    return { entries, foundEntry, data, stoppedEarly, bytesRead, totalBytes };
+  }
+
+  // ---------- helpers ----------
+
+  function formatBytes(n) {
+    if (n == null) return "?";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + " " + units[i];
+  }
+
+  function archiveName(url) {
+    try {
+      const seg = new URL(url).pathname.split("/").filter(Boolean).pop();
+      return seg || url;
+    } catch (_) {
+      return url.split("/").pop() || url;
+    }
+  }
+
+  // Build a case-insensitive matcher from a filter string. Supports glob-style
+  // wildcards: * = any run of chars, ? = one char. Matched unanchored (as a
+  // substring) so a leading path prefix doesn't defeat the pattern.
+  function buildFilterMatcher(pattern) {
+    const p = pattern.trim();
+    if (!p) return null;
+    const rx = p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    try {
+      const re = new RegExp(rx, "i");
+      return (name) => re.test(name);
+    } catch (_) {
+      const lower = p.toLowerCase();
+      return (name) => name.toLowerCase().includes(lower);
+    }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  const TEXT_EXTENSIONS = /\.(txt|xml|log|json|junit\.xml|md|markdown|yaml|yml|csv|html?|js|mjs|py|c|cc|cpp|h|hpp|sh|zsh|cfg|ini|conf|diff|patch|toml|cmake|qml|pro|pri)$/i;
+
+  function looksLikeText(name, bytes) {
+    if (TEXT_EXTENSIONS.test(name)) return true;
+    const sample = bytes.subarray(0, Math.min(bytes.length, 4096));
+    let suspicious = 0;
+    for (let i = 0; i < sample.length; i++) {
+      const b = sample[i];
+      if (b === 0) return false;
+      if (b < 7 || (b > 13 && b < 32)) suspicious++;
+    }
+    return suspicious / (sample.length || 1) < 0.02;
+  }
+
+  function downloadBlob(bytes, filename) {
+    const blob = new Blob([bytes]);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename.split("/").pop() || "file";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+
+  // ---------- UI wiring ----------
+
+  const form = document.getElementById("form");
+  const urlInput = document.getElementById("url");
+  const filenameInput = document.getElementById("filename");
+  const goBtn = document.getElementById("go");
+  const statusEl = document.getElementById("status");
+  const statusLabel = document.getElementById("statusLabel");
+  const statusNum = document.getElementById("statusNum");
+  const bar = document.getElementById("bar");
+  const cancelBtn = document.getElementById("cancelBtn");
+  const resultsEl = document.getElementById("results");
+
+  let currentController = null;
+
+  // Grow the shown preview so the panel's bottom sits just above the viewport
+  // bottom — fills the remaining space without overflowing into a page scroll.
+  // Self-correcting via clientHeight + delta, so it's safe to call repeatedly.
+  let currentPreview = null;
+  function fitPreview() {
+    const pre = currentPreview;
+    if (!pre || !pre.isConnected) { currentPreview = null; return; }
+    const panel = pre.closest(".panel");
+    const bottomGap = 24;
+    const delta = (window.innerHeight - bottomGap) - panel.getBoundingClientRect().bottom;
+    pre.style.maxHeight = Math.max(160, pre.clientHeight + delta) + "px";
+  }
+  window.addEventListener("resize", fitPreview);
+
+  function setBusy(busy) {
+    goBtn.disabled = busy;
+    urlInput.disabled = busy;
+    filenameInput.disabled = busy;
+    statusEl.classList.toggle("active", busy);
+  }
+
+  function updateProgress({ bytesRead, totalBytes, entriesSeen, lastEntryName }) {
+    statusLabel.textContent = lastEntryName ? "scanning: " + lastEntryName : "downloading…";
+    if (totalBytes) {
+      const pct = Math.min(100, (bytesRead / totalBytes) * 100);
+      bar.classList.remove("indeterminate");
+      bar.style.width = pct.toFixed(1) + "%";
+      statusNum.textContent = formatBytes(bytesRead) + " / " + formatBytes(totalBytes) + " · " + entriesSeen + " entries";
+    } else {
+      bar.classList.add("indeterminate");
+      statusNum.textContent = formatBytes(bytesRead) + " downloaded · " + entriesSeen + " entries";
+    }
+  }
+
+  function renderError(title, detail) {
+    resultsEl.innerHTML = "";
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    panel.innerHTML =
+      '<div class="msg-err"><strong>' + escapeHtml(title) + "</strong></div>" +
+      (detail ? '<div class="meta">' + detail + "</div>" : "");
+    resultsEl.appendChild(panel);
+  }
+
+  function renderFetchFailed(url, rawMessage) {
+    resultsEl.innerHTML = "";
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    panel.innerHTML =
+      '<div class="msg-err"><strong>Fetch failed.</strong></div>' +
+      '<div class="meta" style="margin-top:8px">' +
+      "Could not read a response from that URL — check that it's reachable and correct." +
+      "</div>" +
+      (rawMessage ? '<div class="meta" style="margin-top:10px;opacity:.7">raw error: ' + escapeHtml(rawMessage) + "</div>" : "");
+    resultsEl.appendChild(panel);
+  }
+
+  function renderFound(entry, bytes, stoppedEarly) {
+    resultsEl.innerHTML = "";
+    const panel = document.createElement("div");
+    panel.className = "panel";
+
+    const isText = looksLikeText(entry.name, bytes);
+    const PREVIEW_CAP = 5 * 1024 * 1024;
+    let bodyHtml = "";
+
+    if (isText) {
+      const text = textDecoder.decode(bytes);
+      const shown = text.length > PREVIEW_CAP ? text.slice(0, PREVIEW_CAP) : text;
+      bodyHtml =
+        '<pre class="preview">' + escapeHtml(shown) + "</pre>" +
+        (text.length > PREVIEW_CAP
+          ? '<div class="truncated-note">Preview truncated at ' + formatBytes(PREVIEW_CAP) + " — download for the full file.</div>"
+          : "");
+    } else {
+      bodyHtml = '<div class="meta">Binary content — no inline preview.</div>';
+    }
+
+    panel.innerHTML =
+      '<div class="msg-ok crumb"><a href="#" class="crumb-link">' + escapeHtml(archiveName(urlInput.value.trim())) + "</a>" +
+      '<span class="crumb-sep">/</span><strong>' + escapeHtml(entry.name) + "</strong></div>" +
+      '<div class="meta"><b>' + formatBytes(entry.size) + "</b></div>" + bodyHtml;
+
+    panel.querySelector(".crumb-link").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      navigate(urlInput.value.trim(), "", true);
+    });
+
+    const dlBtn = document.createElement("button");
+    dlBtn.className = "btn-ghost btn-sm";
+    dlBtn.style.marginTop = "12px";
+    dlBtn.textContent = "Download";
+    dlBtn.onclick = () => downloadBlob(bytes, entry.name);
+    panel.appendChild(dlBtn);
+
+    resultsEl.appendChild(panel);
+
+    currentPreview = panel.querySelector(".preview");
+    if (currentPreview) requestAnimationFrame(fitPreview);
+  }
+
+  function renderNotFound(targetName, entries) {
+    resultsEl.innerHTML = "";
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    const needle = targetName.toLowerCase();
+    const similar = entries.filter(e => e.name.toLowerCase().includes(needle) || needle.includes(e.name.toLowerCase().split("/").pop()));
+    panel.innerHTML =
+      '<div class="msg-warn"><strong>"' + escapeHtml(targetName) + '" not found</strong></div>' +
+      '<div class="meta">Scanned all ' + entries.length + " entries in the archive.</div>" +
+      (similar.length
+        ? '<div class="meta" style="margin-top:8px">Similar names:<br>' +
+          similar.slice(0, 15).map(e => "&nbsp;&nbsp;· " + escapeHtml(e.name)).join("<br>") + "</div>"
+        : "");
+    resultsEl.appendChild(panel);
+    renderListing(entries, panel);
+  }
+
+  function renderListing(entries, appendTo) {
+    const panel = appendTo || document.createElement("div");
+    if (!appendTo) { resultsEl.innerHTML = ""; panel.className = "panel"; }
+
+    const wrap = document.createElement("div");
+    wrap.style.marginTop = appendTo ? "16px" : "0";
+
+    const filterRow = document.createElement("div");
+    filterRow.className = "filter-row";
+    filterRow.innerHTML = '<input type="text" placeholder="filter…" id="listFilter">';
+    wrap.appendChild(filterRow);
+
+    const table = document.createElement("table");
+    table.className = "listing";
+    table.innerHTML = "<thead><tr><th>name</th><th>size</th></tr></thead><tbody></tbody>";
+    wrap.appendChild(table);
+
+    const countNote = document.createElement("div");
+    countNote.className = "count-note";
+    wrap.appendChild(countNote);
+
+    panel.appendChild(wrap);
+    if (!appendTo) resultsEl.appendChild(panel);
+
+    const tbody = table.querySelector("tbody");
+    const sorted = entries.slice().sort((a, b) => a.name.localeCompare(b.name));
+
+    function draw(filter) {
+      const match = buildFilterMatcher(filter);
+      const shown = match ? sorted.filter(e => match(e.name)) : sorted;
+      tbody.innerHTML = "";
+      const cap = 500;
+      shown.slice(0, cap).forEach((e) => {
+        const tr = document.createElement("tr");
+        const tdName = document.createElement("td");
+        tdName.textContent = e.name;
+        const tdSize = document.createElement("td");
+        tdSize.className = "size";
+        tdSize.textContent = e.type === "5" ? "dir" : formatBytes(e.size);
+        if (e.type !== "5") {
+          tr.className = "clickable";
+          tr.onclick = () => navigate(urlInput.value.trim(), e.name, true);
+        }
+        tr.appendChild(tdName); tr.appendChild(tdSize);
+        tbody.appendChild(tr);
+      });
+      countNote.textContent = shown.length > cap
+        ? "showing " + cap + " of " + shown.length + " matching entries — refine the filter"
+        : shown.length + " of " + entries.length + " entries";
+    }
+
+    const filterEl = wrap.querySelector("#listFilter");
+    filterEl.value = currentFilter;
+    filterEl.addEventListener("input", (e) => {
+      currentFilter = e.target.value;
+      syncFilterToUrl();
+      draw(currentFilter);
+    });
+    draw(currentFilter);
+  }
+
+  async function runScan(url, targetName) {
+    if (currentController) currentController.abort();
+    const controller = new AbortController();
+    currentController = controller;
+
+    setBusy(true);
+    bar.style.width = "0%";
+    bar.classList.remove("indeterminate");
+    statusLabel.textContent = "connecting…";
+    statusNum.textContent = "";
+    resultsEl.innerHTML = "";
+
+    try {
+      const result = await scanArchive(url, targetName || null, {
+        signal: controller.signal,
+        onProgress: updateProgress
+      });
+
+      if (targetName) {
+        if (result.foundEntry) {
+          renderFound(result.foundEntry, result.data, result.stoppedEarly);
+        } else {
+          renderNotFound(targetName, result.entries);
+        }
+      } else {
+        resultsEl.innerHTML = '<div class="panel"><div class="meta"><b>' + result.entries.length +
+          "</b> entries · " + formatBytes(result.entries.reduce((s, e) => s + e.size, 0)) + " uncompressed</div></div>";
+        renderListing(result.entries, resultsEl.querySelector(".panel"));
+      }
+    } catch (e) {
+      if (e.name === "AbortError") {
+        renderError("Cancelled", null);
+      } else if (e instanceof HttpError) {
+        renderError("Server returned " + e.status, e.message);
+      } else if (e instanceof TypeError) {
+        renderFetchFailed(url, e.message);
+      } else {
+        renderError("Something went wrong", escapeHtml(e.message || String(e)));
+      }
+    } finally {
+      setBusy(false);
+      currentController = null;
+    }
+  }
+
+  // The URL is the source of truth: ?archive=<url>[&file=<name>][&filter=<glob>].
+  // navigate() syncs the inputs, the history entry, and the scan; popstate
+  // replays whatever the URL says without pushing a new entry. The filter is
+  // carried along so a filtered listing survives navigating into a file and back.
+  let currentFilter = "";
+
+  function buildUrl() {
+    const params = new URLSearchParams();
+    params.set("archive", urlInput.value.trim());
+    const file = filenameInput.value.trim();
+    if (file) params.set("file", file);
+    if (currentFilter) params.set("filter", currentFilter);
+    return window.location.pathname + "?" + params.toString();
+  }
+
+  function navigate(archive, file, push) {
+    urlInput.value = archive;
+    filenameInput.value = file || "";
+    const url = buildUrl();
+    const state = { archive, file: file || null, filter: currentFilter };
+    if (push) history.pushState(state, "", url);
+    else history.replaceState(state, "", url);
+    runScan(archive, file || "");
+  }
+
+  // Reflect a filter change in the URL without pushing a history entry per keystroke.
+  function syncFilterToUrl() {
+    history.replaceState(
+      { archive: urlInput.value.trim(), file: null, filter: currentFilter },
+      "", buildUrl());
+  }
+
+  window.addEventListener("popstate", () => {
+    const params = new URLSearchParams(window.location.search);
+    const archive = params.get("archive");
+    if (!archive) {
+      // Back to the bare page — abort any scan and reset to the empty form.
+      if (currentController) currentController.abort();
+      urlInput.value = "";
+      filenameInput.value = "";
+      currentFilter = "";
+      resultsEl.innerHTML = "";
+      return;
+    }
+    const file = params.get("file");
+    currentFilter = params.get("filter") || "";
+    urlInput.value = archive;
+    filenameInput.value = file || "";
+    runScan(archive, file || "");
+  });
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const url = urlInput.value.trim();
+    const targetName = filenameInput.value.trim();
+    if (!url) return;
+    currentFilter = "";
+    navigate(url, targetName, true);
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    if (currentController) currentController.abort();
+  });
+
+  // Bootstrap from the initial URL, replacing (not pushing) so back doesn't
+  // land on a blank in-app state.
+  const initialParams = new URLSearchParams(window.location.search);
+  const initialArchive = initialParams.get("archive");
+  if (initialArchive) {
+    currentFilter = initialParams.get("filter") || "";
+    navigate(initialArchive, initialParams.get("file") || "", false);
+  }
+})();
+</script>
+</body>
+</html>
