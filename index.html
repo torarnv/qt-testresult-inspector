@@ -678,7 +678,7 @@
   // non-pass summary; message lines (QWARN/QDEBUG/QINFO/...) aren't results.
   const RESULT_TYPES = new Set(
     ["PASS", "FAIL!", "XFAIL", "XPASS", "SKIP", "BPASS", "BFAIL", "BXPASS", "BXFAIL"]);
-  const PASS_TYPES = new Set(["PASS", "BPASS"]);
+  const PASS_TYPES = new Set(["PASS", "BPASS", "XFAIL"]);
 
   // Pull non-pass result incidents out of a testlib log. Each carries its line
   // index (within the passed text) and a short label (the test function).
