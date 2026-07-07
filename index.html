@@ -191,7 +191,11 @@
   .hit-fail { color: var(--err); }
   .hit-other { color: var(--warn); }
   .result-hit b, .hit-fail, .hit-other { font-weight: 600; }
-  .result-hit.flash { background: var(--accent); color: #06231c; }
+  @keyframes result-flash {
+    from { background-color: var(--accent); color: #06231c; }
+    to { background-color: transparent; }
+  }
+  .result-hit.flash { animation: result-flash 1s ease-out; }
 
   .file-controls {
     display: flex;
@@ -263,7 +267,6 @@
 
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js"></script>
 <script>
 (function () {
   "use strict";
@@ -424,20 +427,13 @@
         }
 
         const consumer = this.onEntry({ name, size, type: typeflag });
-        this.current = { size, remaining: size, consumer };
+        this.current = { name, size, remaining: size, consumer };
         this.mode = "data";
       }
     }
   }
 
-  // ---------- archive scanning ----------
-
-  class HttpError extends Error {
-    constructor(status, statusText) {
-      super(`HTTP ${status} ${statusText}`);
-      this.status = status;
-    }
-  }
+  // ---------- archive scanning (Web Worker) ----------
 
   function concatAll(chunks, totalLen) {
     const out = new Uint8Array(totalLen);
@@ -446,86 +442,158 @@
     return out;
   }
 
-  // Streams `url`, decompresses zstd, walks the tar. If targetName is given,
-  // captures that one entry's bytes and aborts the fetch the moment it's fully
-  // read. If targetName is null, walks every entry (skipping file bodies) to
-  // build a full listing.
-  async function scanArchive(url, targetName, { signal, onProgress } = {}) {
-    const res = await fetch(url, { signal, mode: "cors" });
-    if (!res.ok) throw new HttpError(res.status, res.statusText);
+  // In-tab cache of the whole decompressed archive: navigating between any of
+  // its files never re-fetches or re-decompresses. Holds one archive at a time
+  // (the most recent) — its full entry list plus every file's bytes. This is a
+  // plain JS-heap object, so the browser frees it when the tab closes; loading a
+  // different archive drops the previous one (see cacheStore's url check). The
+  // whole point is to keep everything, so there's no byte budget — the cost is
+  // holding the archive's full uncompressed size in memory while the tab is open.
+  const cache = { url: null, entries: null, files: new Map() };
 
-    const contentLengthHeader = res.headers.get("content-length");
-    const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
-
-    const entries = [];
-    let foundEntry = null;
-    let foundComplete = false;
-    let capturedChunks = [];
-
-    const parser = new TarParser((entry) => {
-      entries.push(entry);
-      if (targetName && entry.name === targetName) {
-        foundEntry = entry;
-        return {
-          write: (d) => capturedChunks.push(d),
-          end: () => { foundComplete = true; }
-        };
-      }
-      return null;
-    });
-
-    let parseError = null;
-    const zstd = new fzstd.Decompress((chunk) => {
-      try { parser.push(chunk); } catch (e) { parseError = e; }
-    });
-
-    if (!res.body) {
-      // Fallback for browsers without streaming response bodies: read it all,
-      // then decompress in one shot. No early-abort possible in this path.
-      const full = new Uint8Array(await res.arrayBuffer());
-      zstd.push(full, true);
-      if (parseError) throw parseError;
-      const data = foundEntry ? concatAll(capturedChunks, foundEntry.size) : null;
-      return { entries, foundEntry, data, stoppedEarly: false, bytesRead: full.length, totalBytes: full.length };
-    }
-
-    const reader = res.body.getReader();
-    let bytesRead = 0;
-    let stoppedEarly = false;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        zstd.push(new Uint8Array(0), true);
-        break;
-      }
-      bytesRead += value.length;
-      try {
-        zstd.push(value);
-      } catch (e) {
-        try { await reader.cancel(); } catch (_) {}
-        throw new Error("Couldn't decompress this as zstd: " + e.message);
-      }
-      if (parseError) { try { await reader.cancel(); } catch (_) {} throw parseError; }
-
-      if (onProgress) {
-        onProgress({
-          bytesRead, totalBytes,
-          entriesSeen: entries.length,
-          lastEntryName: entries.length ? entries[entries.length - 1].name : null
-        });
-      }
-
-      if (targetName && foundComplete) {
-        stoppedEarly = true;
-        try { await reader.cancel(); } catch (_) {}
-        break;
-      }
-    }
-
-    const data = foundEntry ? concatAll(capturedChunks, foundEntry.size) : null;
-    return { entries, foundEntry, data, stoppedEarly, bytesRead, totalBytes };
+  function cacheStore(url, entries, name, data) {
+    if (cache.url !== url) { cache.url = url; cache.entries = null; cache.files = new Map(); }
+    if (entries) cache.entries = entries;
+    if (name && data) cache.files.set(name, data);
   }
+
+  // Runs inside the Web Worker. Streams `url`, decompresses zstd, walks the tar,
+  // and captures *every* file's bytes — we already decompress the whole archive
+  // to the end (to complete the browser's HTTP cache of the compressed body), so
+  // this keeps the results instead of discarding them. If targetName is given,
+  // the instant that one entry is complete it's posted back ("found") so the UI
+  // can render before the walk finishes. At the end, "done" hands the main
+  // thread the full entry list plus all captured files — transferred (zero-copy)
+  // so ownership moves out of the worker rather than being duplicated. The main
+  // thread then caches the lot for instant navigation.
+  //
+  // force-cache reuses a cached copy without revalidating — even on a manual
+  // reload — and only hits the network when the archive isn't cached at all.
+  function workerScan() {
+    self.onmessage = async (ev) => {
+      const { url, targetName } = ev.data;
+      const post = (msg, transfer) => self.postMessage(msg, transfer || []);
+
+      let res;
+      try {
+        res = await fetch(url, { mode: "cors", cache: "force-cache" });
+      } catch (e) {
+        post({ type: "error", kind: "fetch", message: (e && e.message) || String(e) });
+        return;
+      }
+      if (!res.ok) {
+        post({ type: "error", kind: "http", status: res.status, statusText: res.statusText });
+        return;
+      }
+
+      const entries = [];
+      const files = new Map(); // name -> Uint8Array, everything except the posted target
+      let posted = false;
+
+      const parser = new TarParser((entry) => {
+        entries.push(entry);
+        if (entry.type === "5") return null; // directory, no body to capture
+        let chunks = [];
+        return {
+          write: (d) => chunks.push(d),
+          end: () => {
+            const data = concatAll(chunks, entry.size);
+            chunks = null;
+            if (targetName && !posted && entry.name === targetName) {
+              // Render this one immediately; ownership moves to the main thread,
+              // so it's not kept in `files` (it'd be a detached buffer anyway).
+              posted = true;
+              post({ type: "found", entry, data: data.buffer }, [data.buffer]);
+            } else {
+              files.set(entry.name, data);
+            }
+          }
+        };
+      });
+
+      let parseError = null;
+      let decompressedBytes = 0;
+      let lastPost = 0;
+      let sentEntries = 0; // entries already sent to the main thread as deltas
+      // Report progress from the decompression stream, not the network reads:
+      // a cached body arrives in one chunk, so network reads say nothing about
+      // the 1–2 s of zstd work. fzstd calls this per decompressed block, giving
+      // fine granularity even then. Throttled, and emitted for the whole walk —
+      // even after the target's "found" — so that navigating back to the listing
+      // mid-extraction still shows live progress. The main thread ignores it
+      // whenever a view is already on screen.
+      const zstd = new fzstd.Decompress((chunk) => {
+        try { parser.push(chunk); } catch (e) { parseError = e; }
+        decompressedBytes += chunk.length;
+        const now = Date.now();
+        if (now - lastPost >= 60) {
+          lastPost = now;
+          const cur = parser.current;
+          const newEntries = entries.slice(sentEntries);
+          sentEntries = entries.length;
+          post({
+            type: "progress",
+            decompressedBytes,
+            entriesSeen: entries.length,
+            newEntries,
+            currentName: cur && cur.name ? cur.name
+              : (entries.length ? entries[entries.length - 1].name : null),
+            currentSize: cur && cur.name ? cur.size : null,
+            currentRead: cur && cur.name ? cur.size - cur.remaining : null
+          });
+        }
+      });
+      const failZstd = (m) => post({ type: "error", kind: "zstd", message: m });
+
+      // Hand the main thread the full entry list and every captured file, all
+      // buffers transferred in one go (zero-copy) so we don't duplicate ~565 MB.
+      const postDone = () => {
+        const names = [];
+        const buffers = [];
+        for (const [name, data] of files) { names.push(name); buffers.push(data.buffer); }
+        post({ type: "done", entries, names, buffers }, buffers);
+      };
+
+      if (!res.body) {
+        // Fallback for workers without streaming response bodies: read it all,
+        // then decompress in one shot.
+        const full = new Uint8Array(await res.arrayBuffer());
+        try { zstd.push(full, true); } catch (e) { failZstd(e.message); return; }
+        if (parseError) { failZstd(parseError.message); return; }
+        postDone();
+        return;
+      }
+
+      const reader = res.body.getReader();
+      while (true) {
+        let chunk;
+        try {
+          chunk = await reader.read();
+        } catch (e) {
+          post({ type: "error", kind: "fetch", message: (e && e.message) || String(e) });
+          return;
+        }
+        if (chunk.done) {
+          try { zstd.push(new Uint8Array(0), true); } catch (e) { failZstd(e.message); return; }
+          break;
+        }
+        try { zstd.push(chunk.value); } catch (e) { failZstd(e.message); return; }
+        if (parseError) { failZstd(parseError.message); return; }
+      }
+      if (parseError) { failZstd(parseError.message); return; }
+      postDone();
+    };
+  }
+
+  // Assemble the worker source from the shared parser code (stringified so this
+  // stays a single self-contained file) plus the scan driver above, and hand it
+  // to the worker as a Blob URL. fzstd is pulled in with importScripts.
+  const workerUrl = URL.createObjectURL(new Blob([[
+    'importScripts("https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js");',
+    'const textDecoder = new TextDecoder("utf-8", { fatal: false });',
+    readStr, readSize, isAllZero, concatBytes, concatAll, parsePaxRecords, TarParser,
+    "(", workerScan, ")();"
+  ].map(String).join("\n")], { type: "text/javascript" }));
 
   // ---------- helpers ----------
 
@@ -615,7 +683,15 @@
   const cancelBtn = document.getElementById("cancelBtn");
   const resultsEl = document.getElementById("results");
 
-  let currentController = null;
+  let currentWorker = null;
+  let scanUrl = null;        // archive the current worker is extracting
+  let desiredTarget = null;  // "" = listing, or a filename — the view to show
+  let viewRendered = false;  // is the desired view already on screen?
+
+  function terminateWorker() {
+    if (currentWorker) { currentWorker.terminate(); currentWorker = null; }
+    scanUrl = null;
+  }
 
   let wrapLines = getCookie("wrapLines") === "1";
 
@@ -626,17 +702,21 @@
     statusEl.classList.toggle("active", busy);
   }
 
-  function updateProgress({ bytesRead, totalBytes, entriesSeen, lastEntryName }) {
-    statusLabel.textContent = lastEntryName ? "scanning: " + lastEntryName : "downloading…";
-    if (totalBytes) {
-      const pct = Math.min(100, (bytesRead / totalBytes) * 100);
-      bar.classList.remove("indeterminate");
-      bar.style.width = pct.toFixed(1) + "%";
-      statusNum.textContent = formatBytes(bytesRead) + " / " + formatBytes(totalBytes) + " · " + entriesSeen + " entries";
-    } else {
-      bar.classList.add("indeterminate");
-      statusNum.textContent = formatBytes(bytesRead) + " downloaded · " + entriesSeen + " entries";
+  // Total uncompressed size isn't known until the walk finishes, so the bar is
+  // indeterminate; the numbers (decompressed bytes, entries, current name) are
+  // what actually show how far along the scan is.
+  function updateProgress({ decompressedBytes, entriesSeen, currentName, currentSize, currentRead }) {
+    let label = "Loading…";
+    if (currentName) {
+      label = "Extracting: " + currentName;
+      // Show byte progress within large entries — a big file (e.g. LastTest.log)
+      // is where the walk spends its time, so the bare name would look stuck.
+      if (currentSize != null && currentSize >= 1024 * 1024)
+        label += " (" + formatBytes(currentRead) + " / " + formatBytes(currentSize) + ")";
     }
+    statusLabel.textContent = label;
+    bar.classList.add("indeterminate");
+    statusNum.textContent = formatBytes(decompressedBytes) + " decompressed · " + entriesSeen + " entries";
   }
 
   function renderError(title, detail) {
@@ -726,8 +806,9 @@
         const target = panel.querySelector("#res-" + idx);
         if (!target) return;
         target.scrollIntoView({ block: "center" });
+        target.classList.remove("flash");
+        void target.offsetWidth;
         target.classList.add("flash");
-        setTimeout(() => target.classList.remove("flash"), 1200);
       });
       li.appendChild(a);
       ul.appendChild(li);
@@ -736,7 +817,7 @@
     return summary;
   }
 
-  function renderFound(entry, bytes, stoppedEarly) {
+  function renderFound(entry, bytes) {
     resultsEl.innerHTML = "";
     const panel = document.createElement("div");
     panel.className = "panel";
@@ -853,10 +934,12 @@
     if (!appendTo) resultsEl.appendChild(panel);
 
     const tbody = table.querySelector("tbody");
-    const sorted = entries.slice().sort((a, b) => a.name.localeCompare(b.name));
 
+    // sorted is re-derived each draw so the same `entries` array can grow (used
+    // for the incremental listing during extraction) and redraws pick it up.
     function draw(filter) {
       const match = buildFilterMatcher(filter);
+      const sorted = entries.slice().sort((a, b) => a.name.localeCompare(b.name));
       const shown = match ? sorted.filter(e => match(e.name)) : sorted;
       tbody.innerHTML = "";
       const cap = 500;
@@ -887,51 +970,178 @@
       draw(currentFilter);
     });
     draw(currentFilter);
+    return draw;
   }
 
-  async function runScan(url, targetName) {
-    if (currentController) currentController.abort();
-    const controller = new AbortController();
-    currentController = controller;
+  function listingHeadHtml(entries, done) {
+    return "<b>" + entries.length + "</b> entries · " +
+      formatBytes(entries.reduce((s, e) => s + e.size, 0)) + " uncompressed" +
+      (done ? "" : " · extracting…");
+  }
 
+  function showListing(entries) {
+    resultsEl.innerHTML = '<div class="panel"><div class="meta">' + listingHeadHtml(entries, true) + "</div></div>";
+    renderListing(entries, resultsEl.querySelector(".panel"));
+  }
+
+  // Incremental listing shown while an archive is still extracting. Builds the
+  // panel + table once, then redraws as batches of entries arrive. `entries` is
+  // the same growing array across calls; `done` drops the "extracting…" note.
+  let liveList = null;     // { head, redraw } while a live listing is on screen
+  let liveEntries = null;  // the growing entry array backing it
+
+  function liveListingUpdate(entries, done) {
+    if (!liveList) {
+      resultsEl.innerHTML = "";
+      const panel = document.createElement("div");
+      panel.className = "panel";
+      const head = document.createElement("div");
+      head.className = "meta";
+      panel.appendChild(head);
+      resultsEl.appendChild(panel);
+      const redraw = renderListing(entries, panel);
+      liveList = { head, redraw };
+    }
+    liveList.head.innerHTML = listingHeadHtml(entries, done);
+    liveList.redraw(currentFilter);
+  }
+
+  // Renders the current desired view from the cache. `entries` present means the
+  // archive is fully cached; otherwise we can still show a single already-cached
+  // file (from an early "found") with a fallback entry.
+  function renderView(targetName) {
+    if (!targetName) { showListing(cache.entries); return; }
+    if (cache.files.has(targetName)) {
+      const data = cache.files.get(targetName);
+      const entry = (cache.entries && cache.entries.find(e => e.name === targetName))
+        || { name: targetName, size: data.length, type: "0" };
+      renderFound(entry, data);
+    } else {
+      renderNotFound(targetName, cache.entries);
+    }
+  }
+
+  function startProgressUI() {
+    viewRendered = false;
+    liveList = null;
+    liveEntries = null;
     setBusy(true);
     bar.style.width = "0%";
     bar.classList.remove("indeterminate");
-    statusLabel.textContent = "connecting…";
+    statusLabel.textContent = "Loading…";
     statusNum.textContent = "";
     resultsEl.innerHTML = "";
+  }
 
-    try {
-      const result = await scanArchive(url, targetName || null, {
-        signal: controller.signal,
-        onProgress: updateProgress
-      });
-
-      if (targetName) {
-        if (result.foundEntry) {
-          renderFound(result.foundEntry, result.data, result.stoppedEarly);
-        } else {
-          renderNotFound(targetName, result.entries);
+  // Handles messages from the extraction worker. Rendering follows the *current*
+  // `desiredTarget`, not the target the worker was launched with — so navigating
+  // around mid-extraction just re-points what we show. Every message also feeds
+  // the in-tab cache, so once "done" lands all navigation is a synchronous hit.
+  function handleScanMessage(url, msg) {
+    if (msg.type === "progress") {
+      if (!viewRendered) {
+        updateProgress(msg);
+        // On the listing view, grow the table as entries stream in.
+        if (desiredTarget === "") {
+          if (!liveEntries) liveEntries = [];
+          if (msg.newEntries) for (const e of msg.newEntries) liveEntries.push(e);
+          liveListingUpdate(liveEntries, false);
         }
-      } else {
-        resultsEl.innerHTML = '<div class="panel"><div class="meta"><b>' + result.entries.length +
-          "</b> entries · " + formatBytes(result.entries.reduce((s, e) => s + e.size, 0)) + " uncompressed</div></div>";
-        renderListing(result.entries, resultsEl.querySelector(".panel"));
       }
-    } catch (e) {
-      if (e.name === "AbortError") {
-        renderError("Cancelled", null);
-      } else if (e instanceof HttpError) {
-        renderError("Server returned " + e.status, e.message);
-      } else if (e instanceof TypeError) {
-        renderFetchFailed(url, e.message);
-      } else {
-        renderError("Something went wrong", escapeHtml(e.message || String(e)));
-      }
-    } finally {
-      setBusy(false);
-      currentController = null;
+      return;
     }
+    if (msg.type === "found") {
+      cacheStore(url, null, msg.entry.name, new Uint8Array(msg.data));
+      if (!viewRendered && desiredTarget === msg.entry.name) {
+        viewRendered = true;
+        setBusy(false);
+        renderFound(msg.entry, cache.files.get(msg.entry.name));
+      }
+      return;
+    }
+    if (msg.type === "done") {
+      // Absorb the whole decompressed archive into the in-tab cache: entries plus
+      // every file's bytes (transferred, so we adopt the buffers), then show
+      // whatever the user is currently after if it isn't already up.
+      cacheStore(url, msg.entries, null, null);
+      for (let i = 0; i < msg.names.length; i++)
+        cache.files.set(msg.names[i], new Uint8Array(msg.buffers[i]));
+      if (!viewRendered) {
+        viewRendered = true;
+        setBusy(false);
+        if (desiredTarget === "" && liveList) {
+          // Finalize the live listing in place with the authoritative full set
+          // (the last streamed batch may have trailed the final progress tick),
+          // keeping the table and any active filter rather than rebuilding.
+          liveEntries.length = 0;
+          for (const e of msg.entries) liveEntries.push(e);
+          liveListingUpdate(liveEntries, true);
+        } else {
+          renderView(desiredTarget);
+        }
+      }
+      liveList = null;
+      liveEntries = null;
+      terminateWorker();
+      return;
+    }
+    if (msg.type === "error") {
+      viewRendered = true;
+      setBusy(false);
+      if (msg.kind === "http") renderError("Server returned " + msg.status, "HTTP " + msg.status + " " + escapeHtml(msg.statusText || ""));
+      else if (msg.kind === "fetch") renderFetchFailed(url, msg.message);
+      else if (msg.kind === "zstd") renderError("Couldn't decompress this as zstd", escapeHtml(msg.message || ""));
+      else renderError("Something went wrong", escapeHtml(msg.message || ""));
+      terminateWorker();
+    }
+  }
+
+  // Starts or re-points a scan. A full cache hit renders synchronously. An
+  // already-cached file renders now and lets any in-flight extraction of the
+  // rest continue. If a worker is already extracting this same archive we attach
+  // to it and wait — no restart. Only a genuinely new archive spawns a worker.
+  function runScan(url, targetName) {
+    targetName = targetName || "";
+    desiredTarget = targetName;
+
+    if (cache.url === url && cache.entries) {
+      terminateWorker();
+      viewRendered = true;
+      setBusy(false);
+      renderView(targetName);
+      return;
+    }
+
+    if (targetName && cache.url === url && cache.files.has(targetName)) {
+      viewRendered = true;
+      setBusy(false);
+      const data = cache.files.get(targetName);
+      const entry = (cache.entries && cache.entries.find(e => e.name === targetName))
+        || { name: targetName, size: data.length, type: "0" };
+      renderFound(entry, data);
+      return;
+    }
+
+    if (currentWorker && scanUrl === url) {
+      // Same archive is already being extracted — just wait for it to finish.
+      startProgressUI();
+      return;
+    }
+
+    terminateWorker();
+    scanUrl = url;
+    startProgressUI();
+    const worker = new Worker(workerUrl);
+    currentWorker = worker;
+    worker.onmessage = (ev) => handleScanMessage(url, ev.data);
+    worker.onerror = () => {
+      if (viewRendered) return;
+      viewRendered = true;
+      setBusy(false);
+      renderError("Something went wrong", "The decompression worker failed to start.");
+      terminateWorker();
+    };
+    worker.postMessage({ url, targetName });
   }
 
   // The URL is the source of truth: ?archive=<url>[&file=<name>][&filter=<glob>].
@@ -971,7 +1181,7 @@
     const archive = params.get("archive");
     if (!archive) {
       // Back to the bare page — abort any scan and reset to the empty form.
-      if (currentController) currentController.abort();
+      terminateWorker();
       urlInput.value = "";
       filenameInput.value = "";
       currentFilter = "";
@@ -995,7 +1205,11 @@
   });
 
   cancelBtn.addEventListener("click", () => {
-    if (currentController) currentController.abort();
+    if (currentWorker) {
+      terminateWorker();
+      setBusy(false);
+      renderError("Cancelled", null);
+    }
   });
 
   // Bootstrap from the initial URL, replacing (not pushing) so back doesn't
