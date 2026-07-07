@@ -682,6 +682,15 @@
   const bar = document.getElementById("bar");
   const cancelBtn = document.getElementById("cancelBtn");
   const resultsEl = document.getElementById("results");
+  const introEl = document.querySelector(".sub");
+
+  // The intro blurb and the URL/file form are clutter once you're reading a
+  // file (the breadcrumb navigates back), so hide them on the file view and
+  // show them on the listing / empty / error views.
+  function setHeaderVisible(v) {
+    introEl.style.display = v ? "" : "none";
+    form.style.display = v ? "" : "none";
+  }
 
   let currentWorker = null;
   let scanUrl = null;        // archive the current worker is extracting
@@ -720,6 +729,7 @@
   }
 
   function renderError(title, detail) {
+    setHeaderVisible(true);
     resultsEl.innerHTML = "";
     const panel = document.createElement("div");
     panel.className = "panel";
@@ -730,6 +740,7 @@
   }
 
   function renderFetchFailed(url, rawMessage) {
+    setHeaderVisible(true);
     resultsEl.innerHTML = "";
     const panel = document.createElement("div");
     panel.className = "panel";
@@ -818,6 +829,7 @@
   }
 
   function renderFound(entry, bytes) {
+    setHeaderVisible(false);
     resultsEl.innerHTML = "";
     const panel = document.createElement("div");
     panel.className = "panel";
@@ -893,6 +905,7 @@
   }
 
   function renderNotFound(targetName, entries) {
+    setHeaderVisible(true);
     resultsEl.innerHTML = "";
     const panel = document.createElement("div");
     panel.className = "panel";
@@ -980,6 +993,7 @@
   }
 
   function showListing(entries) {
+    setHeaderVisible(true);
     resultsEl.innerHTML = '<div class="panel"><div class="meta">' + listingHeadHtml(entries, true) + "</div></div>";
     renderListing(entries, resultsEl.querySelector(".panel"));
   }
@@ -992,6 +1006,7 @@
 
   function liveListingUpdate(entries, done) {
     if (!liveList) {
+      setHeaderVisible(true);
       resultsEl.innerHTML = "";
       const panel = document.createElement("div");
       panel.className = "panel";
@@ -1025,6 +1040,7 @@
     viewRendered = false;
     liveList = null;
     liveEntries = null;
+    setHeaderVisible(desiredTarget === ""); // hide while loading a file, show for a listing
     setBusy(true);
     bar.style.width = "0%";
     bar.classList.remove("indeterminate");
@@ -1167,6 +1183,9 @@
     if (push) history.pushState(state, "", url);
     else history.replaceState(state, "", url);
     runScan(archive, file || "");
+    // Forward navigations start at the top; back/forward go through popstate
+    // (not here), so the browser's scroll restoration keeps their position.
+    window.scrollTo(0, 0);
   }
 
   // Reflect a filter change in the URL without pushing a history entry per keystroke.
@@ -1182,6 +1201,7 @@
     if (!archive) {
       // Back to the bare page — abort any scan and reset to the empty form.
       terminateWorker();
+      setHeaderVisible(true);
       urlInput.value = "";
       filenameInput.value = "";
       currentFilter = "";
