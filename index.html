@@ -993,6 +993,7 @@
   }
 
   function showListing(entries) {
+    if (maybeAutoOpenFirstMatch(entries)) return;
     setHeaderVisible(true);
     resultsEl.innerHTML = '<div class="panel"><div class="meta">' + listingHeadHtml(entries, true) + "</div></div>";
     renderListing(entries, resultsEl.querySelector(".panel"));
@@ -1091,7 +1092,8 @@
           // keeping the table and any active filter rather than rebuilding.
           liveEntries.length = 0;
           for (const e of msg.entries) liveEntries.push(e);
-          liveListingUpdate(liveEntries, true);
+          if (!maybeAutoOpenFirstMatch(liveEntries))
+            liveListingUpdate(liveEntries, true);
         } else {
           renderView(desiredTarget);
         }
@@ -1166,6 +1168,24 @@
   // carried along so a filtered listing survives navigating into a file and back.
   let currentFilter = "";
 
+  // A one-shot directive (URL param `viewFirstFilterMatch`): when a listing with
+  // an active filter finalizes, auto-open the first matching file instead of
+  // showing the listing. Consumed on first use so navigating back to the listing
+  // sticks rather than bouncing straight back into the file.
+  let viewFirstFilterMatch = false;
+
+  function maybeAutoOpenFirstMatch(entries) {
+    if (!viewFirstFilterMatch) return false;
+    const match = buildFilterMatcher(currentFilter);
+    if (!match) return false;
+    const sorted = entries.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const hit = sorted.find(e => e.type !== "5" && match(e.name));
+    if (!hit) return false;
+    viewFirstFilterMatch = false;
+    navigate(urlInput.value.trim(), hit.name, true);
+    return true;
+  }
+
   function buildUrl() {
     const params = new URLSearchParams();
     params.set("archive", urlInput.value.trim());
@@ -1238,6 +1258,7 @@
   const initialArchive = initialParams.get("archive");
   if (initialArchive) {
     currentFilter = initialParams.get("filter") || "";
+    viewFirstFilterMatch = initialParams.has("viewFirstFilterMatch");
     navigate(initialArchive, initialParams.get("file") || "", false);
   }
 })();
