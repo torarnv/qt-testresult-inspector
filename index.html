@@ -902,6 +902,18 @@
       toggle.appendChild(document.createTextNode("wrap lines"));
       controls.appendChild(toggle);
     }
+
+    if (jumpToTestFailure && testResults && testResults.length) {
+      const idx = findTestResultIndex(testResults, jumpToTestFailure);
+      const target = idx >= 0 && panel.querySelector("#res-" + idx);
+      if (target) {
+        jumpToTestFailure = null;
+        requestAnimationFrame(() => {
+          target.scrollIntoView({ block: "center" });
+          target.classList.add("flash");
+        });
+      }
+    }
   }
 
   function renderNotFound(targetName, entries) {
@@ -1174,6 +1186,22 @@
   // sticks rather than bouncing straight back into the file.
   let viewFirstFilterMatch = false;
 
+  // A one-shot directive (URL param `jumpToTestFailure`): a testlib result label
+  // such as "tst_QFoo::someFunction(some data tag)" to scroll to and flash once
+  // the file it lives in is rendered. Consumed on the first successful jump.
+  let jumpToTestFailure = null;
+
+  // Locate a parsed result by its label, tolerating whitespace differences and a
+  // caller that omits the data tag (exact → prefix → substring).
+  function findTestResultIndex(results, needle) {
+    const norm = s => s.replace(/\s+/g, " ").trim();
+    const want = norm(needle);
+    let idx = results.findIndex(r => norm(r.label) === want);
+    if (idx < 0) idx = results.findIndex(r => norm(r.label).startsWith(want));
+    if (idx < 0) idx = results.findIndex(r => norm(r.label).includes(want));
+    return idx;
+  }
+
   function maybeAutoOpenFirstMatch(entries) {
     if (!viewFirstFilterMatch) return false;
     const match = buildFilterMatcher(currentFilter);
@@ -1259,6 +1287,7 @@
   if (initialArchive) {
     currentFilter = initialParams.get("filter") || "";
     viewFirstFilterMatch = initialParams.has("viewFirstFilterMatch");
+    jumpToTestFailure = initialParams.get("jumpToTestFailure") || null;
     navigate(initialArchive, initialParams.get("file") || "", false);
   }
 })();
